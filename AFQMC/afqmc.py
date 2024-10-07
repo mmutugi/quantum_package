@@ -4,6 +4,7 @@ import numpy as np
 import sys
 from scipy.io import FortranFile
 from ezfio import ezfio
+#import subprocess
 
 def read_ezfio(ezfio_filename):
     ezfio.set_file(ezfio_filename)
@@ -22,7 +23,16 @@ def read_ezfio(ezfio_filename):
     n_electron = beta_num + alpha_num
     n_det  = ezfio.get_determinants_n_det()
 
+    overlap_data = ezfio.get_ao_one_e_ints_ao_integrals_overlap()
+
+    """ flatten to convert the data from a list. """
+    if isinstance(overlap_data[0], list):
+        overlap_data = [item for sublist in overlap_data for item in sublist]
+        n_electron = beta_num + alpha_num
+
     alpha_beta_det = []
+    alpha_beta_det_string = []
+    wg_list = 0
 
     # Loop
     for i, det_pair in enumerate(psi_det):
@@ -32,22 +42,34 @@ def read_ezfio(ezfio_filename):
             psi_coef = psi_coeff[i]  
 
             alpha_det_binary = ''.join([bin(det) for det in alpha_det])  
-            beta_det_binary = ''.join([bin(det) for det in beta_det])    
+            beta_det_binary = ''.join([bin(det) for det in beta_det]) 
+
+            alpha_det_string = ''.join([bin(det)[2:] for det in alpha_det])  
+            beta_det_string = ''.join([bin(det)[2:] for det in beta_det]) 
+
+            #:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: 
 
             # Append data
             alpha_beta_det.append([alpha_det_binary, beta_det_binary, psi_coef])
+            alpha_beta_det_string.append([alpha_det_string, beta_det_string, psi_coef])
+            #wg_list += psi_coef**2
 
         except IndexError:
             print(f"Warning: Index error at i={i}, not aligned.")
             break
 
-    with open(output_file, 'w') as f:
-        f.write(f"{'Alpha det':20} {'Beta det':20} {'Psi_coefficients':20}\n")
         
-        for alpha_det, beta_det, psi_coef in alpha_beta_det:
-            f.write(f"{alpha_det:20} {beta_det:20} {psi_coef:20.16f}\n")
 
+    with open(output_file, 'w') as f:
+       # f.write(f"{'Alpha det':20} {'Beta det':20} {'Psi_coefficients':20}\n")
+        
+        for alpha_det, beta_det, psi_coef in alpha_beta_det_string:
+            f.write(f"{alpha_det:20} {beta_det:20} {psi_coef:20.16f}\n")
+            
     print(f"Success writing in {output_file}")
+
+    #return alpha_beta_det_string
+    
 
     with open(MCSCF_dat, 'w') as f:
         mo_s = [coef for sublist in mo_coef for coef in sublist]
@@ -58,7 +80,58 @@ def read_ezfio(ezfio_filename):
                                     
     print("MCSF_MO data also written")
 
-    return NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename
+    return NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string,overlap_data
+
+def make_one_body_gms(overlap_data):
+
+    n_orbitals = int(len(overlap_data) ** 0.5) 
+    formatted_data = []
+    idx = 0
+    for i in range(1, n_orbitals + 1):
+        for j in range(1, n_orbitals + 1):
+            value = overlap_data[idx]
+            if isinstance(value, (list, tuple)): 
+                raise TypeError(f"Unexpected list or tuple at index {idx}: {value}")
+            formatted_data.append(f"{i} {j} {value: .12f}")
+            idx += 1
+    return formatted_data
+
+
+def write_cas_wf(alpha_beta_det_string, outfile = 'CAS_WF_rcas'):
+    # First construct cumulative sum weightlist
+    wt_list = np.zeros(len(alpha_beta_det_string))
+    coeffs = [i[2] for i in alpha_beta_det_string]
+    csum = 0.0
+    for i in range(len(alpha_beta_det_string)):
+        csum += np.square(coeffs[i])
+        wt_list[i] = csum
+
+    # Now deal with cutoff if needed
+    ndet = len(alpha_beta_det_string)
+        
+    format_det = lambda z: '  '.join([str(i[0]+1) for i in filter(lambda x : x[1] == '1', enumerate(z[::-1]))])
+    
+    with open(outfile, 'w') as cas_file:
+        cas_file.write("# --- BEGIN TRIAL WAVE FUNCTION --- simple cut\n")
+        cas_file.write(f"# Total number of determinants = {ndet}\n")
+        cas_file.write(f"# Total weight                 = {wt_list[ndet-1]}\n")
+        cas_file.write('multidet_cfg\n')
+
+        for i in range(ndet):
+            cas_file.write(f"{format_det(alpha_beta_det_string[i][0])}\t{format_det(alpha_beta_det_string[i][1])}\t#\t{coeffs[i]: 20.16f}\n")
+
+        cas_file.write('\n')
+        cas_file.write('multidet_ampl\n')
+        cas_file.write('#             amplitude  # ndets   det_tot_weight\n')
+
+        for i in range(ndet):
+            cas_file.write(f"{coeffs[i]:20.16f} 0.0  #{i+1:20}\t{wt_list[i]:20.16f}\n")
+
+        cas_file.write('\n')
+        cas_file.write('multidet_type 1\n')
+        cas_file.write(f'npsitdet {ndet}\n')
+        cas_file.write('# --- END TRIAL WAVE FUNCTION --- simple cut\n')
+    return wt_list
 
 
 def dump_fci(fcidump_file, NORB): 
@@ -128,6 +201,7 @@ def write_mcd_core(filename, NORB, mcd):
                     counter += 1
             g.write_record(Llst[:])
         return filename
+    
 
 def afqmc_in(n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename):
     with open(afqmc_in_filename, 'w') as f:
@@ -208,10 +282,17 @@ if __name__ == "__main__":
         fcidump_file = sys.argv[1]
         ezfio_filename = sys.argv[2]
 
-        NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename = read_ezfio(ezfio_filename)
+        NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string,overlap_data = read_ezfio(ezfio_filename)
+        write_cas_wf(alpha_beta_det_string, outfile = 'CAS_WF_rcas')
         eri = dump_fci(fcidump_file, NORB)
         mcd= core_mcd(eri, NORB, chmax=2000, tolcd=1e-5)
         eri = dump_fci(fcidump_file, NORB)
         write_mcd_core(filename, NORB, mcd)
+        formatted_output = make_one_body_gms(overlap_data)
+        gms_output_file = 'one_body_gms'
+        with open(gms_output_file, 'w') as f:
+            for line in formatted_output:
+                f.write(line + '\n')
         afqmc_in(n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename)
+
 
