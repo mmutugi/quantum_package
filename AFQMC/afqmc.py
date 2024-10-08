@@ -4,13 +4,15 @@ import numpy as np
 import sys
 from scipy.io import FortranFile
 from ezfio import ezfio
-#import subprocess
+import subprocess
+
+
 
 def read_ezfio(ezfio_filename):
     ezfio.set_file(ezfio_filename)
     
     output_file = 'CI_coeff.dat'
-    MCSCF_dat  = 'MCSCF_MO.dat'
+    MCSCF_dat  = 'MCSCF_MOs.dat'
     afqmc_in_filename = 'afqmc.in'
     filename = 'V2b_AO_cholesky.mat'
     psi_coeff = ezfio.get_determinants_psi_coef()[0]  
@@ -24,6 +26,10 @@ def read_ezfio(ezfio_filename):
     n_det  = ezfio.get_determinants_n_det()
 
     overlap_data = ezfio.get_ao_one_e_ints_ao_integrals_overlap()
+    core_hamiltonian = ezfio.get_ao_one_e_ints_ao_one_e_integrals()
+
+    if isinstance(core_hamiltonian[0], list):
+        core_hamiltonian = [item for sublist in core_hamiltonian for item in sublist]
 
     """ flatten to convert the data from a list. """
     if isinstance(overlap_data[0], list):
@@ -63,7 +69,7 @@ def read_ezfio(ezfio_filename):
     with open(output_file, 'w') as f:
        # f.write(f"{'Alpha det':20} {'Beta det':20} {'Psi_coefficients':20}\n")
         
-        for alpha_det, beta_det, psi_coef in alpha_beta_det_string:
+        for alpha_det, beta_det, psi_coef in alpha_beta_det:
             f.write(f"{alpha_det:20} {beta_det:20} {psi_coef:20.16f}\n")
             
     print(f"Success writing in {output_file}")
@@ -73,28 +79,57 @@ def read_ezfio(ezfio_filename):
 
     with open(MCSCF_dat, 'w') as f:
         mo_s = [coef for sublist in mo_coef for coef in sublist]
-        f.write(f"MO coefficients: {len(mo_s)}\n")
-        for coef in mo_s:
-            f.write(f"{coef:24.16f}\n")
-        f.write('\n')
-                                    
+        for i in range(0, len(mo_s), n_basis):
+            row = mo_s[i:i + n_basis] 
+            f.write(" ".join(f"{coef:24.16f}" for coef in row) + "\n")
+        f.write('\n') 
+                           
     print("MCSF_MO data also written")
+    return NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string,alpha_beta_det,overlap_data,core_hamiltonian
 
-    return NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string,overlap_data
-
-def make_one_body_gms(overlap_data):
-
+def make_one_body_gms(overlap_data,core_hamiltonian):
     n_orbitals = int(len(overlap_data) ** 0.5) 
+    n_orbitals1 = int(len(core_hamiltonian) ** 0.5) 
     formatted_data = []
+    core_hamiltonian1 = []
     idx = 0
     for i in range(1, n_orbitals + 1):
         for j in range(1, n_orbitals + 1):
             value = overlap_data[idx]
-            if isinstance(value, (list, tuple)): 
+            if isinstance(value,(list, tuple)): 
                 raise TypeError(f"Unexpected list or tuple at index {idx}: {value}")
-            formatted_data.append(f"{i} {j} {value: .12f}")
+            formatted_data.append(f"{i}      {j} {value: .12f}")
             idx += 1
-    return formatted_data
+    idx = 0
+    for i in range(1, n_orbitals1 + 1):
+        for j in range(1, n_orbitals1 + 1):
+            value1 = core_hamiltonian[idx]
+
+            if isinstance(value1,(list, tuple)): 
+                raise TypeError(f"Unexpected list or tuple at index {idx}: {value}")
+            
+            core_hamiltonian1.append(f"{i}      {j} {value1: .12f}")
+            idx += 1
+
+    return formatted_data,core_hamiltonian1
+
+
+
+def make_ROHF(n_basis, file='ROHF.dat'):
+    C = np.identity(n_basis)
+    with open(file,'w') as g:
+        g.write('%9s %9s #ROHF orbitals \n' % (n_basis,n_basis))
+        g.write(' \n')
+        for ip in range(n_basis):
+            for ib in range(n_basis):
+                g.write(' %.12f \n' % (C[ib,ip]))
+            g.write(' \n')
+        g.write('%9s %9s #ROHF orbitals \n' % (n_basis,n_basis))
+        g.write(' \n')
+        for ip in range(n_basis):
+            for ib in range(n_basis):
+                g.write(' %.12f \n' % (C[ib,ip]))
+            g.write(' \n')
 
 
 def write_cas_wf(alpha_beta_det_string, outfile = 'CAS_WF_rcas'):
@@ -282,16 +317,26 @@ if __name__ == "__main__":
         fcidump_file = sys.argv[1]
         ezfio_filename = sys.argv[2]
 
-        NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string,overlap_data = read_ezfio(ezfio_filename)
+        NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string, alpha_beta_det, overlap_data,core_hamiltonian = read_ezfio(ezfio_filename)
+        make_ROHF(n_basis, file='ROHF.dat')
         write_cas_wf(alpha_beta_det_string, outfile = 'CAS_WF_rcas')
         eri = dump_fci(fcidump_file, NORB)
         mcd= core_mcd(eri, NORB, chmax=2000, tolcd=1e-5)
         eri = dump_fci(fcidump_file, NORB)
         write_mcd_core(filename, NORB, mcd)
-        formatted_output = make_one_body_gms(overlap_data)
+        formatted_output,core_hamiltonian1 = make_one_body_gms(overlap_data,core_hamiltonian)
         gms_output_file = 'one_body_gms'
         with open(gms_output_file, 'w') as f:
+            f.write(f"  {n_basis}      {n_basis**2} #\n")
+            f.write(f"Overlap \n")
             for line in formatted_output:
+                f.write(line + '\n')
+            f.write(' \n')
+
+            f.write(f"Core hamiltonian \n")
+
+            f.write(' \n')
+            for line in core_hamiltonian1:
                 f.write(line + '\n')
         afqmc_in(n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename)
 
