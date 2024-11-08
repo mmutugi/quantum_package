@@ -2,17 +2,36 @@
 
 import numpy as np
 import sys
+from pyscf import gto, scf, fci, ao2mo, lib, tools
 from scipy.io import FortranFile
 from ezfio import ezfio
+import re
 import subprocess
 
+def pyscf():
+    mol = gto.M(
+        atom='Be 0 0 0',
+        basis='cc-pvdz',
+        symmetry=True
+    )
 
+    overlap_matrix = mol.intor('int1e_ovlp')
+    core_hamiltonian = mol.intor('int1e_nuc') + mol.intor('int1e_kin')
+    mf = scf.RHF(mol)
+    mf.kernel()
+    h1e = mf.get_hcore()
+    h2e = ao2mo.kernel(mol, mf.mo_coeff)
+    tools.fcidump.from_integrals('FCIDUMP', h1e, h2e, mol.nao, mol.nelectron, mf.energy_nuc())
+    fcidump_file = 'FCIDUMP'
+    return overlap_matrix, core_hamiltonian,fcidump_file
 
-def read_ezfio(ezfio_filename):
+def read_ezfio(ezfio_filename, fcidump_file, core_hamiltonian, overlap_matrix):
+
+    
     ezfio.set_file(ezfio_filename)
     
     output_file = 'CI_coeff.dat'
-    MCSCF_dat  = 'MCSCF_MOs.dat'
+    MCSCF_dat = 'MCSCF_MOs.dat'
     afqmc_in_filename = 'afqmc.in'
     filename = 'V2b_AO_cholesky.mat'
     psi_coeff = ezfio.get_determinants_psi_coef()[0]  
@@ -20,57 +39,49 @@ def read_ezfio(ezfio_filename):
     mo_coef = ezfio.get_mo_basis_mo_coef()
     alpha_num = ezfio.get_electrons_elec_alpha_num()
     beta_num = ezfio.get_electrons_elec_beta_num()
-    n_basis = ezfio.get_mo_basis_mo_num()
-    NORB = n_basis 
+
+    with open(fcidump_file, 'r') as f:
+        data = f.read()
+        NORB = int(re.search(r"NORB= *\d*", data)[0].split('=')[1])
+
+    n_basis = NORB
     n_electron = beta_num + alpha_num
-    n_det  = ezfio.get_determinants_n_det()
+    n_det = ezfio.get_determinants_n_det()
 
-    overlap_data = ezfio.get_ao_one_e_ints_ao_integrals_overlap()
-    core_hamiltonian = ezfio.get_ao_one_e_ints_ao_one_e_integrals()
+    
+    core_hamiltonian = core_hamiltonian.flatten().tolist()
+    #with open(core_hamiltonian, 'r') as f:
+     #   core_hamiltonian = [float(value) for line in f for value in line.split()]
 
-    if isinstance(core_hamiltonian[0], list):
-        core_hamiltonian = [item for sublist in core_hamiltonian for item in sublist]
+    overlap_data = overlap_matrix.flatten().tolist()
+    #with open(overlap_matrix, 'r') as f:
+     #   overlap_data = [float(value) for line in f for value in line.split()]
 
-    """ flatten to convert the data from a list. """
-    if isinstance(overlap_data[0], list):
-        overlap_data = [item for sublist in overlap_data for item in sublist]
-        n_electron = beta_num + alpha_num
-
+    
     alpha_beta_det = []
     alpha_beta_det_string = []
-    wg_list = 0
-
-    # Loop
     for i, det_pair in enumerate(psi_det):
         try:
-            alpha_det = det_pair[0]  
-            beta_det = det_pair[1]   
-            psi_coef = psi_coeff[i]  
+            alpha_det = det_pair[0]
+            beta_det = det_pair[1]
+            psi_coef = psi_coeff[i]
 
-            alpha_det_binary = ''.join([bin(det) for det in alpha_det])  
-            beta_det_binary = ''.join([bin(det) for det in beta_det]) 
+            alpha_det_string = ''.join([bin(det) for det in alpha_det])
+            beta_det_string = ''.join([bin(det)for det in beta_det])
 
-            alpha_det_string = ''.join([bin(det)[2:] for det in alpha_det])  
-            beta_det_string = ''.join([bin(det)[2:] for det in beta_det]) 
-
-            #:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: 
-
-            # Append data
-            alpha_beta_det.append([alpha_det_binary, beta_det_binary, psi_coef])
+            
+            alpha_beta_det.append([alpha_det, beta_det, psi_coef])
             alpha_beta_det_string.append([alpha_det_string, beta_det_string, psi_coef])
-            #wg_list += psi_coef**2
 
         except IndexError:
             print(f"Warning: Index error at i={i}, not aligned.")
             break
 
-        
-
     with open(output_file, 'w') as f:
        # f.write(f"{'Alpha det':20} {'Beta det':20} {'Psi_coefficients':20}\n")
         
-        for alpha_det, beta_det, psi_coef in alpha_beta_det:
-            f.write(f"{alpha_det:20} {beta_det:20} {psi_coef:20.16f}\n")
+        for alpha_det_string, beta_det_string, psi_coef in alpha_beta_det_string:
+            f.write(f"{alpha_det_string:20} {beta_det_string:20} {psi_coef:20.16f}\n")
             
     print(f"Success writing in {output_file}")
 
@@ -85,7 +96,15 @@ def read_ezfio(ezfio_filename):
         f.write('\n') 
                            
     print("MCSF_MO data also written")
-    return NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string,alpha_beta_det,overlap_data,core_hamiltonian
+
+    subprocess.run(
+        f"qp_run molden {ezfio_filename}",
+        shell=True, check=True 
+    )
+    
+    return (NORB, n_basis, n_electron, alpha_num, beta_num, n_det, 
+            afqmc_in_filename, filename, alpha_beta_det_string, 
+            alpha_beta_det, overlap_data, core_hamiltonian)
 
 def make_one_body_gms(overlap_data,core_hamiltonian):
     n_orbitals = int(len(overlap_data) ** 0.5) 
@@ -171,6 +190,7 @@ def write_cas_wf(alpha_beta_det_string, outfile = 'CAS_WF_rcas'):
 
 def dump_fci(fcidump_file, NORB): 
     eri = np.zeros([NORB, NORB, NORB, NORB])
+    #hcore = np.zeros([NORB,NORB])
 
     with open(fcidump_file, 'r') as file:
         for line in file:
@@ -186,7 +206,15 @@ def dump_fci(fcidump_file, NORB):
                 k = int(parts[3]) - 1
                 l = int(parts[4]) - 1
 
-                eri[i, j, k, l] = val
+                eri[i,j,k,l] = val
+                #eri[k,l,i,j] = val
+                #eri[j,i,l,k] = val
+                #eri[l,k,j,i] = val
+                #eri[j,i,k,l] = val
+                #eri[l,k,i,j] = val
+                #eri[i,j,l,k] = val
+                #eri[k,l,j,i] = val 
+
     return eri
 
 def core_mcd(eri, NORB, chmax=2000, tolcd=1e-5):
@@ -310,14 +338,15 @@ def afqmc_in(n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,
         f.write(f"SMW_BATCH {'false'}\n")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 2:
         print("Usage: python script.py <input_fcidump_file> <ezfio_filename>")
         sys.exit(1)
     else:
-        fcidump_file = sys.argv[1]
-        ezfio_filename = sys.argv[2]
+        ezfio_filename = sys.argv[1]
+        
 
-        NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string, alpha_beta_det, overlap_data,core_hamiltonian = read_ezfio(ezfio_filename)
+        overlap_matrix, core_hamiltonian,fcidump_file = pyscf()
+        NORB, n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename,alpha_beta_det_string, alpha_beta_det, overlap_data,core_hamiltonian = read_ezfio(ezfio_filename,fcidump_file,core_hamiltonian,overlap_matrix)
         make_ROHF(n_basis, file='ROHF.dat')
         write_cas_wf(alpha_beta_det_string, outfile = 'CAS_WF_rcas')
         eri = dump_fci(fcidump_file, NORB)
@@ -339,5 +368,6 @@ if __name__ == "__main__":
             for line in core_hamiltonian1:
                 f.write(line + '\n')
         afqmc_in(n_basis, n_electron, alpha_num, beta_num, n_det, afqmc_in_filename,filename)
+
 
 
