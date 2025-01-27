@@ -23,7 +23,7 @@
 
 9. Run `./configure -i resultsFile` -> This is also quick and then returns cowsay that `All dependencies installed` but that `/path/to/qp2/build.ninja does not exist`.
 
-10. Run `module load openblas` -> Do not specify amything else (expanse does have different variants of Openblas.)\
+10. Run `module load openblas` -> Do not specify amything else (expanse does have different variants of Openblas.) `mkl` works too, but you'll need to load it as `module load mkl`
 
 11. Run `./configure -c config/gfortran_openblas.cfg` and then 
 
