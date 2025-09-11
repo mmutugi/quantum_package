@@ -13,7 +13,7 @@ except:
 
 import numpy
 
-def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
+def get_afqmc_data(trexio_filename, verbose: bool = True, multiplicity: bool = True ) -> None:
     trexio_file = trexio.File(trexio_filename, "r", trexio.TREXIO_AUTO)
 
     mo_num = trexio.read_mo_num(trexio_file)
@@ -105,6 +105,7 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
     binstr = []
     occa = []
     occb = []
+    string=[]
 
     start = time.time()
 
@@ -114,33 +115,46 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
 
         occa.append(trexio.to_orbital_list(nint, alpha_bits)) 
         occb.append(trexio.to_orbital_list(nint, beta_bits))
+        print(f"occa",occa)
 
-        print (f"time taken to read determinant {len(binstr)}: {time.time() - start:.2f} seconds")
+        occastr = ''
+        occbstr = ''
+        for x in range (mo_num):
+            if x in occa[-1]:
+                occastr = '1'+ occastr 
+            else:
+                occastr ='0'+ occastr 
+        for x in range (mo_num):
+            if x in occb[-1]:
+                occbstr = '1' + occbstr 
+            else:
+                occbstr = '0'+ occbstr 
 
+        string.append((occastr.lstrip('0'), occbstr.lstrip('0')))
         # Convert each 64-bit integer to binary and concatenate
+        #alpha_int = sum(x << (64 * i) for i, x in enumerate(alpha_bits[::-1]))
+        #beta_int = sum(x << (64 * i) for i, x in enumerate(beta_bits[::-1]))
 
-        alpha_int = sum(x << (64 * i) for i, x in enumerate(alpha_bits[::-1]))
-        beta_int = sum(x << (64 * i) for i, x in enumerate(beta_bits[::-1]))
+        #print (f"time for the conversion of determinant {len(binstr)}: {time.time() - start:.2f} seconds")
 
-        print (f"time for the conversion of determinant {len(binstr)}: {time.time() - start:.2f} seconds")
-
-        alpha_bin = bin(alpha_int)
-        beta_bin  = bin(beta_int)
-
-        binstr.append((alpha_bin, beta_bin))
-
-    occa = numpy.array(occa)
-    occb = numpy.array(occb)
-    binstr = numpy.array(binstr, dtype=object)
+        #alpha_bin = bin(alpha_int)
+        #beta_bin  = bin(beta_int)
+        #binstr.append((alpha_bin, beta_bin))
+    
+    
+    print(f"string", string)
+    #occa = numpy.array(occa)
+    #occb = numpy.array(occb)
+    #binstr = numpy.array(binstr, dtype=object)
 
     start_write = time.time()
 
     # Remove consistently occupied orbitals from the right
     n_frozen_orbs = 0
-    while True:
+    while multiplicity:
         try:
         # Reverse strings and slice from n_frozen_orbs (to check last orbitals)
-            if ('0' in [i[0][::-1][n_frozen_orbs] for i in binstr]) or ('0' in [i[1][::-1][n_frozen_orbs] for i in binstr]):
+            if ('0' in [i[0][::-1][n_frozen_orbs] for i in string]) or ('0' in [i[1][::-1][n_frozen_orbs] for i in string]):
                 break
             else:
                 n_frozen_orbs += 1
@@ -154,15 +168,16 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
     beta_act = ndn - n_frozen_orbs - 1
 
 # Apply the truncation to the bitstrings
-    binstr = [(a[:-n_frozen_orbs] if n_frozen_orbs > 0 else a,
-           b[:-n_frozen_orbs] if n_frozen_orbs > 0 else b) for a, b in binstr]
-
+    print(f'binstr before truncation: {string[0:10]}')
+    string = [(a[:-n_frozen_orbs] if n_frozen_orbs > 0 else a,
+           b[:-n_frozen_orbs] if n_frozen_orbs > 0 else b) for a, b in string]
+    print(f'binstr after truncation: {string[0:10]}')
 
     with open ('CI_coeff.dat','w') as f:
         for i in range(len(ci_coeffs)):
             coeff = ci_coeffs[i]
-            alpha_bin, beta_bin = binstr[i]
-            f.write(f"{alpha_bin:<30} {beta_bin :<30} {-coeff: .10f}\n")
+            occa, occb = string[i]
+            f.write(f"{'0b'+ occa:<30} {'0b'+ occb :<30} {-coeff: .10f}\n")
 
             print(f"Writing CI coefficient {i+1}/{len(ci_coeffs)}: {time.time() - start_write:.2f} seconds")
 
@@ -184,7 +199,7 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
 
             for i in range(ndet):
 
-                cas_file.write(f"{format_det(binstr[i][0])}\t{format_det(binstr[i][1])}\t#\t{ci_coeffs[i]: 20.16f}\n")
+                cas_file.write(f"{format_det(string[i][0])}\t{format_det(string[i][1])}\t#\t{ci_coeffs[i]: 20.16f}\n")
 
                 #alpha_orb = trexio.to_orbital_list(nint, determinants[i][:nint])
                 #alpha_orb = [x+1 for x in alpha_orb]
@@ -330,7 +345,7 @@ def write_mcd_core(NORB, L, filename ='V2b_AO_cholesky.mat'):
         return filename
 
 
-def afqmc_in(NORB,nup, N_ACT_ORB, N_ACT_UP, N_ACT_DN,  ndn, ndet, afqmc_in_filename = 'afqmc.in'):
+def afqmc_in(NORB,nup, N_ACT_ORB, N_ACT_UP, N_ACT_DN,ndn, ndet, afqmc_in_filename = 'afqmc.in'):
     with open(afqmc_in_filename, 'w') as f:
         #:::::::::::::::::::::::::::::::::
 
@@ -405,15 +420,27 @@ def afqmc_in(NORB,nup, N_ACT_ORB, N_ACT_UP, N_ACT_DN,  ndn, ndet, afqmc_in_filen
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <trexio_file> ")
+        print(f"Usage: {sys.argv[0]} <trexio_file>")
         sys.exit(1)
 
-    get_afqmc_data(sys.argv[1])
-    L = get_afqmc_data(sys.argv[1])['L']
-    NORB = get_afqmc_data(sys.argv[1])['NORB']
-    #mcd = core_mcd(h2e, NORB, chmax=2000, tolcd=1e-5)
+    # Read once
+    data = get_afqmc_data(sys.argv[1])
+
+    NORB        = data["NORB"]
+    L           = data["L"]
+    N_ACT_ORB   = data["N_ACT_ORB"]
+    N_ACT_UP    = data["N_ACT_UP"]
+    N_ACT_DN    = data["N_ACT_DN"]
+    ndn         = data["ndn"]
+    nup         = data["nup"]
+    ndet        = data["ndet"]
+
+    # Write core Hamiltonian
     write_mcd_core(NORB, L)
-    nup, ndn, ndet = get_afqmc_data(sys.argv[1])['nup'], get_afqmc_data(sys.argv[1])['ndn'], get_afqmc_data(sys.argv[1])['ndet']
-    afqmc_in(NORB,nup, ndn, ndet, afqmc_in_filename = 'afqmc.in')
+
+    afqmc_in(NORB, N_ACT_ORB, N_ACT_UP, N_ACT_DN, ndn, ndet, nup, afqmc_in_filename='afqmc.in')
+
+    print(f"Thank you for using this code. The active space was {N_ACT_ORB}")
 
