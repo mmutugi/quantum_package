@@ -1,23 +1,261 @@
 #!/usr/bin/env python3
+"""
+AFQMC Input Generator from TREXIO Output
+========================================
+
+This script extracts and converts quantum chemistry data from a TREXIO-formatted directory
+(ASCII or HDF5) into the required input formats for RICE afqmc. Generates:
+
+- ROHF.dat            : Molecular orbital (MO) coefficient matrix.
+- MCSCF_MOs.dat       : Same MO matrix, used for MCSCF-type trial wavefunctions.
+- one_body_gms.dat    : One-body integrals (core Hamiltonian and AO overlap).
+- CI_coeff.dat        : CI coefficients for multi-determinant trial wavefunctions.
+- CAS_WF_rcas         : Multi-determinant trial wavefunction in real-space AFQMC format.
+- afqmc.in            : AFQMC runtime input file.
+- V2b_AO_cholesky.mat : Two-electron integrals (Cholesky-decomposed) in binary Fortran format.
+
+Main Functional Components:
+---------------------------
+
+- `read_mo_coeff`:
+    Parses `mo.txt` from TREXIO to extract the number of MOs and the MO coefficient matrix.
+
+- `read_overlap`, `read_hamiltonian`:
+    Extracts the AO overlap and one-electron Hamiltonian integrals from `ao_1e_int.txt`.
+
+- `write_rohf_file`, `write_mcsf_file`:
+    Writes MO coefficients to standard text formats used by AFQMC codes.
+
+- `get_afqmc_data`:
+    Uses the TREXIO Python API to extract multi-determinant trial wavefunctions, CI coefficients,
+    and Cholesky vectors from HDF5 TREXIO data.
+
+- `write_one_body_gms`, `write_mcd_core`, `afqmc_in`:
+    Write out AFQMC-specific formatted input files (text and Fortran binary).
+
+Usage:
+------
+
+Run from the command line by providing the path to the TREXIO directory (e.g., `test.trexio`):
+
+    python full.py path/to/test.trexio
+
+By default, verbose mode is enabled. To disable verbose output:
+
+    python full.py path/to/test.trexio --no-verbose
+
+Assumptions:
+------------
+- The TREXIO directory must include:
+    - `mo.txt`              : containing `mo_num` and `mo_coefficient`
+    - `ao_1e_int.txt`       : containing `ao_1e_int_overlap` and `ao_1e_int_core_hamiltonian`
+
+Setup TRexio:
+--------------
+qp set_file xyz.ezfio
+qp set trexio backend 1
+qp set trexio trexio_file xyz.trexio
+qp set trexio export_basis 1
+qp set trexio export_ao_one_e_ints 1
+qp set trexio export_ao_two_e_ints 1
+qp set trexio export_ao_two_e_ints_cholesky 1
+qp set trexio export_mo_one_e_ints 1
+qp set trexio export_mo_two_e_ints 1
+qp set trexio export_mo_two_e_ints_cholesky 1
+qp set trexio export_rdm 1
+qp run export_trexio
+
+Author:
+-------
+Mark Munyi
+
+"""
+
 
 try:
     import trexio
     import numpy as np
     from scipy.io import FortranFile
     import sys
+    import argparse
+    import os
 
 except:
     print("TREXIO is not installed. Please install it first.")
     raise ImportError
 
-import numpy
+def read_mo_coeff(mo_txt_file: str, verbose: bool = True) -> np.ndarray:
+    with open(mo_txt_file, 'r') as f:
+        lines = f.readlines()
 
-def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
-    trexio_file = trexio.File(trexio_filename, "r", trexio.TREXIO_AUTO)
+    # Find mo_num
+    mo_num = None
+    for line in lines:
+        if line.strip().startswith("mo_num "):  # Avoid mo_num_isSet
+            parts = line.strip().split()
+            if len(parts) == 2:
+                mo_num = int(parts[1])
+                if verbose:
+                    print(f"Found mo_num: {mo_num}")
+                break
+    if mo_num is None:
+        raise ValueError("mo_num not found in TREXIO file.")
 
-    mo_num = trexio.read_mo_num(trexio_file)
+    # Find start of mo_coefficient block
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == "mo_coefficient":
+            start_idx = i + 1
+            if verbose:
+                print(f"Found start of mo_coefficient at line {start_idx}")
+            break
+    if start_idx is None:
+        raise ValueError("mo_coefficient block not found.")
+
+    # Read mo_num * mo_num coefficients
+    num_coeffs = mo_num * mo_num
+    coeffs = []
+    for line in lines[start_idx:]:
+        if line.strip() == "" or not any(c.isdigit() for c in line):
+            continue  # skip empty or non-numeric lines
+        try:
+            val = float(line.strip())
+            coeffs.append(val)
+            if len(coeffs) >= num_coeffs:
+                break
+        except ValueError:
+            continue
+
+    if len(coeffs) != num_coeffs:
+        raise ValueError(f"Expected {num_coeffs} MO coefficients, found {len(coeffs)}.")
+
+    coeff_matrix = np.array(coeffs).reshape((mo_num, mo_num))
+    return coeff_matrix
+
+
+def write_rohf_file(filename: str, mo_coeff: np.ndarray) -> None:
+    mo_num = mo_coeff.shape[0]
+    identity = np.identity(mo_num)
+
+    with open(filename, 'w') as f:
+        f.write(f"{mo_num:9d} {mo_num:9d} # ROHF orbitals\n\n")
+        for row in mo_coeff:
+            for val in row:
+                f.write(f"{val:20.16f}\n")
+            f.write("\n")
+        f.write(f"{mo_num:9d} {mo_num:9d} # ROHF orbitals\n\n")
+        for row in mo_coeff:
+            for val in row:
+                f.write(f"{val:20.16f}\n")
+            f.write("\n")
+    return mo_num
+
+
+def write_mcsf_file(filename: str, mo_coeff: np.ndarray) -> None:
+    with open(filename, 'w') as f:
+        for row in mo_coeff:
+            for val in row:
+                f.write(f"{val:20.16f}")
+            f.write("\n")
+
+def read_overlap(hamiltonian_file: str,mo_num, verbose: bool = True) -> np.ndarray:
+    with open(hamiltonian_file, 'r') as f:
+        lines = f.readlines()
+    ##find the overlap information
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == "ao_1e_int_overlap":
+            start_idx = i + 1
+            if verbose:
+                print(f"Found start the overlap info line {start_idx}")
+            break
+    if start_idx is None:
+        raise ValueError("Cannot find overlap info.")
+    
+    num_coeffs = mo_num * mo_num
+    overlap = []
+    for line in lines[start_idx:]:
+        if line.strip() == "" or not any(c.isdigit() for c in line):
+            continue  # skip empty or non-numeric lines
+        try:
+            val = float(line.strip())
+            overlap.append(val)
+            if len(overlap) >= num_coeffs:
+                break
+        except ValueError:
+            continue
+    if len(overlap) != num_coeffs:
+        raise ValueError(f"Expected {num_coeffs} overlaps, found {len(overlap)}.")
+
+    overlap_matrix = np.array(overlap).reshape((mo_num, mo_num))
+    return overlap_matrix
+
+def read_hamiltonian(hamiltonian_file: str,mo_num, verbose: bool = True) -> np.ndarray:
+
+    with open(hamiltonian_file, 'r') as f:
+        lines = f.readlines()
+    ##find the core hamiltonian information
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == "ao_1e_int_core_hamiltonian":
+            start_idx = i + 1
+            if verbose:
+                print(f"Found start core hamiltonian {start_idx}")
+            break
+    if start_idx is None:
+        raise ValueError("no core hamiltonian.")
+    
+    num_coeffs = mo_num * mo_num
+    core_hamiltonian = []
+    for line in lines[start_idx:]:
+        if line.strip() == "" or not any(c.isdigit() for c in line):
+            continue  # skip empty or non-numeric lines
+        try:
+            val = float(line.strip())
+            core_hamiltonian.append(val)
+            if len(core_hamiltonian) >= num_coeffs:
+                break
+        except ValueError:
+            continue
+    if len(core_hamiltonian) != num_coeffs:
+        raise ValueError(f"Expected {num_coeffs} ents, found {len(core_hamiltonian)}.")
+
+    hamiltonian_matrix = np.array(core_hamiltonian).reshape((mo_num, mo_num))
+    return hamiltonian_matrix
+
+def write_one_body_gms(filename: str, overlap_matrix, hamiltonian_matrix, mo_num: int) -> None:
+    with open(filename, 'w') as f:
+        f.write('%9s %9s # \n' % (mo_num,mo_num*mo_num))
+        f.write('Overlap \n')
+        for ip in range(mo_num):
+            for jp in range(mo_num):
+                f.write(' %9s %9s % .12f \n' % (ip+1,jp+1,overlap_matrix[ip,jp]))
+        f.write('\nCore Hamiltonian \n')
+        for ip in range(mo_num):
+            for jp in range(mo_num):
+                f.write(' %9s %9s % .12f \n' % (ip+1,jp+1,hamiltonian_matrix[ip,jp]))
+    return mo_num
+
+
+def write_orbitals(trexio_dir: str, verbose: bool = True) -> None:
+
+    mo_txt_file = os.path.join(trexio_dir, "mo.txt")
+    if not os.path.isfile(mo_txt_file):
+        raise FileNotFoundError(f"Expected mo.txt in {trexio_dir}, but not found.")
+    mo_coeff = read_mo_coeff(mo_txt_file, verbose)
     if verbose:
-        print(f"mo_num = {mo_num} # MOs")
+        print(f"MO coefficient matrix shape: {mo_coeff.shape}")
+
+    write_rohf_file("ROHF.dat", mo_coeff)
+    write_mcsf_file("MCSCF_MOs.dat", mo_coeff)
+
+    if verbose:
+        print("Files written: ROHF.dat, MCSCF_MOs.dat")
+
+def get_afqmc_data(trexio_dir, mo_num, verbose: bool = True) -> None:
+    trexio_file = trexio.File(trexio_dir, "r", trexio.TREXIO_AUTO)
+
 
     ndet = trexio.read_determinant_num(trexio_file)
     if verbose:
@@ -40,11 +278,12 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
     if verbose:
         print(f"Nucleus repulsion energy: {e0}")
 
+
     chol_num = trexio.read_mo_2e_int_eri_cholesky_num(trexio_file)
     if verbose:
-        print(f"chol_num = {chol_num} # Cholesky vectors")
+        print(f"chol_num = {chol_num}") 
+    chol = np.zeros((mo_num, mo_num, chol_num))
 
-    chol = numpy.zeros((mo_num, mo_num, chol_num))
     BUFFER_SIZE = 1000000
     offset = 0
     eof = False
@@ -59,44 +298,7 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
     L = chol.reshape(mo_num * mo_num, chol_num)
     if verbose:
         print(f"Read Cholesky vectors")
-
-    #%_______________________________________________________
-    #BUFFER_SIZE = 1000000
-    #offset = 0
-    #eri = np.zeros([mo_num, mo_num, mo_num, mo_num])
-    #eof = False
-    #fcidump_threshold = 1e-10
-    #integral_eof = False
-    #while not integral_eof:
-     #   indices, values, nread, integral_eof = trexio.read_mo_2e_int_eri(
-      #      trexio_file, offset, BUFFER_SIZE
-       ##offset += nread
-        #for integral in range(nread):
-         #   val = values[integral]
-          #  if np.abs(val) < fcidump_threshold:
-           #     continue
-            #i, j, k, l = indices[integral]
-
-            #eri[i,j,k,l] = val
-            #eri[k,l,i,j] = val
-            #eri[j,i,l,k] = val
-            #eri[l,k,j,i] = val
-            #eri[j,i,k,l] = val
-            #eri[l,k,i,j] = val
-            #eri[i,j,l,k] = val
-            #eri[k,l,j,i] = val
-            #chem_i, chem_j, chem_k, chem_l = i, j, k, l
-
-            #for p, q in ((i, j), (j, i)):
-             #   for r, s in ((k, l), (l, k)):
-              #      eri[p, q, r, s] = val
-               #     eri[r, s, p, q] = val
-                #    print(f"ERI: {p} {q} {r} {s} {val}")
-    
-
-    ##fcidumpfile
-
-
+        
     determinants = trexio.read_determinant_list(trexio_file, 0, ndet)[0]
     nint = trexio.get_int64_num(trexio_file)
 
@@ -121,9 +323,9 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
 
         binstr.append((alpha_bin, beta_bin))
 
-    occa = numpy.array(occa)
-    occb = numpy.array(occb)
-    binstr = numpy.array(binstr, dtype=object)
+    occa = np.array(occa)
+    occb = np.array(occb)
+    binstr = np.array(binstr, dtype=object)
 
     with open ('CI_coeff.dat','w') as f:
         for i in range(len(ci_coeffs)):
@@ -147,17 +349,7 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
             cas_file.write('multidet_cfg\n')
 
             for i in range(ndet):
-
                 cas_file.write(f"{format_det(binstr[i][0])}\t{format_det(binstr[i][1])}\t#\t{ci_coeffs[i]: 20.16f}\n")
-
-                #alpha_orb = trexio.to_orbital_list(nint, determinants[i][:nint])
-                #alpha_orb = [x+1 for x in alpha_orb]
-                #alpha_orb_str = ' '.join([str(x) for x in alpha_orb])
-                #beta_orb = trexio.to_orbital_list(nint, determinants[i][nint:])
-                #beta_orb = [x+1 for x in beta_orb]
-                #beta_orb_str = ' '.join([str(x) for x in beta_orb])
-                #coeff = ci_coeffs[i]
-                #cas_file.write(f"{alpha_orb_str} {beta_orb_str} {coeff:16f}\n")
             cas_file.write('\n')
             cas_file.write('multidet_ampl\n')
             cas_file.write('#             amplitude  # ndets   det_tot_weight\n')
@@ -169,45 +361,6 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
             cas_file.write('multidet_type 1\n')
             cas_file.write(f'npsitdet {ndet}\n')
             cas_file.write('# --- END TRIAL WAVE FUNCTION --- simple cut\n')
-
-    with open('MCSCF_MOs.dat','w') as mcsf_file:
-        s1 = np.identity(mo_num)
-        for x in range(mo_num):
-            for y in range(mo_num):
-                mcsf_file.write(f"{s1[x][y]: 20.16f}")
-            mcsf_file.write('\n')
-
-    with open('ROHF.dat','w') as ROHF_file:
-        identity = np.identity(mo_num)
-        ROHF_file.write('%9s %9s #ROHF orbitals \n' % (mo_num,mo_num))
-        ROHF_file.write('\n')
-        for ip in range(mo_num):
-            for jp in range(mo_num):
-                ROHF_file.write('%20.16f \n' % (identity[ip,jp]))
-            ROHF_file.write('\n')
-        ROHF_file.write('%9s %9s #ROHF orbitals \n' % (mo_num,mo_num))
-        ROHF_file.write('\n')
-        for ip in range(mo_num):
-            for jp in range(mo_num):
-                ROHF_file.write('%20.16f \n' % (identity[ip,jp]))
-            ROHF_file.write('\n')
-
-    with open('one_body_gms','w') as one_body_file:
-        nbasis = hcore.shape[0]
-        identity = np.identity(nbasis)
-        one_body_file.write('%9s %9s # \n' % (nbasis,nbasis*nbasis))
-
-        one_body_file.write('Overlap \n')
-        for ip in range(nbasis):
-            for jp in range(nbasis):
-                one_body_file.write(' %9s %9s % .12f \n' % (ip+1,jp+1,s1[ip,jp]))
-
-        one_body_file.write('\nCore Hamiltonian \n')
-        for ip in range(nbasis):
-            for jp in range(nbasis):
-                one_body_file.write(' %9s %9s % .12f \n' % (ip+1,jp+1,hcore[ip,jp]))
-            #one_body_file.write('\n')
-
     if verbose:
         print(f"Read determinants")
         #print("binstr: ", binstr)
@@ -215,8 +368,6 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
         #print(f"First determinant: {determinants[0]}")
        # print(f"First determinant alpha (bin): {binstr[0][0]}")
         #print(f"First determinant beta (bin): {binstr[0][1]}")
-
-
 
     result = {
         "norb": mo_num,
@@ -229,13 +380,8 @@ def get_afqmc_data(trexio_filename, verbose: bool = True) -> None:
         "chol": chol,
         "L": L[:, :chol_num],
         "NORB": mo_num,
-
-
-
     }
     return result
-
-
 
 
 
@@ -363,17 +509,38 @@ def afqmc_in(NORB,nup, ndn, ndet, afqmc_in_filename = 'afqmc.in'):
         f.write(f"SMW_BATCH {'false'}\n")
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Extract info for AFQMC from a trexio file.")
+    parser.add_argument("trexio_filename", type=str, help="Path to TREXIO folder or file.")
+    parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose output.")
+    parser.set_defaults(verbose=True)
+
+    args = parser.parse_args()
+
+    write_orbitals(args.trexio_filename, args.verbose)
+
+    mo_txt_file = os.path.join(args.trexio_filename, "mo.txt")
+    mo_coeff = read_mo_coeff(mo_txt_file, verbose=args.verbose)
+    mo_num = mo_coeff.shape[0]
+
+    hamiltonian_file = os.path.join(args.trexio_filename, "ao_1e_int.txt")
+    overlap = read_overlap(hamiltonian_file, mo_num, args.verbose)
+    hcore = read_hamiltonian(hamiltonian_file, mo_num, args.verbose)
+    write_one_body_gms("one_body_gms", overlap, hcore, mo_num)
+
+    afqmc_data = get_afqmc_data(args.trexio_filename, mo_num, args.verbose)
+
+    afqmc_in(
+        afqmc_data["NORB"],
+        afqmc_data["nup"],
+        afqmc_data["ndn"],
+        afqmc_data["ndet"],
+        afqmc_in_filename="afqmc.in"
+    )
+    write_mcd_core(afqmc_data["NORB"], afqmc_data["L"])
+
+    if args.verbose:
+        print("AFQMC input generation complete.")
+
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <trexio_file> ")
-        sys.exit(1)
-
-    get_afqmc_data(sys.argv[1])
-    L = get_afqmc_data(sys.argv[1])['L']
-    NORB = get_afqmc_data(sys.argv[1])['NORB']
-    #mcd = core_mcd(h2e, NORB, chmax=2000, tolcd=1e-5)
-    write_mcd_core(NORB, L)
-    nup, ndn, ndet = get_afqmc_data(sys.argv[1])['nup'], get_afqmc_data(sys.argv[1])['ndn'], get_afqmc_data(sys.argv[1])['ndet']
-    afqmc_in(NORB,nup, ndn, ndet, afqmc_in_filename = 'afqmc.in')
-
+    main()
