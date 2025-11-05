@@ -84,6 +84,11 @@ except:
     print("TREXIO is not installed. Please install it first.")
     raise ImportError
 
+koeffs = []
+def o
+
+
+
 def read_mo_coeff(mo_txt_file: str, verbose: bool = True) -> np.ndarray:
     with open(mo_txt_file, 'r') as f:
         lines = f.readlines()
@@ -143,7 +148,7 @@ def write_rohf_file(filename: str, mo_coeff: np.ndarray) -> None:
             for val in row:
                 f.write(f"{val:20.16f}\n")
             f.write("\n")
-        f.write(f"{mo_num:9d} {mo_num:9d} # ROHF orbitals\n\n")
+        f.write(f"{{{mo_num:9d}}} {mo_num:9d} # ROHF orbitals\n\n")
         for row in mo_coeff:
             for val in row:
                 f.write(f"{val:20.16f}\n")
@@ -253,6 +258,38 @@ def write_orbitals(trexio_dir: str, verbose: bool = True) -> None:
     if verbose:
         print("Files written: ROHF.dat, MCSCF_MOs.dat")
 
+
+
+
+def read_eri(eri_file: str, mo_num: int, verbose: bool = True) -> np.ndarray:
+    
+    eri = np.zeros((mo_num, mo_num, mo_num, mo_num))
+
+    with open(eri_file, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue  # skip malformed lines
+
+            try:
+                i, k, j, l = map(int, parts[:4])
+                val = float(parts[4])
+            except ValueError:
+                continue  # skip non-numeric lines
+            eri[i,j,k,l] = val
+            eri[j,i,k,l] = val
+            eri[i,j,l,k] = val
+            eri[j,i,l,k] = val
+            eri[k,l,i,j] = val
+            eri[l,k,i,j] = val
+            eri[k,l,j,i] = val
+            eri[l,k,j,i] = val
+
+    if verbose:
+        print(f"ERI tensor (fully symmetrized): shape = {eri.shape}")
+    return eri
+
+
 def get_afqmc_data(trexio_dir, mo_num, verbose: bool = True) -> None:
     trexio_file = trexio.File(trexio_dir, "r", trexio.TREXIO_AUTO)
 
@@ -266,10 +303,6 @@ def get_afqmc_data(trexio_dir, mo_num, verbose: bool = True) -> None:
     if verbose:
         print(f"{nup} up- and {ndn} down-spin electrons")
 
-    hcore = trexio.read_mo_1e_int_core_hamiltonian(trexio_file)
-    if verbose:
-        print("Core Hamiltonian found")
-
     ci_coeffs = trexio.read_determinant_coefficient(trexio_file, 0, ndet)[0]
     if verbose:
         print(f"Read CI coefficients")
@@ -279,42 +312,66 @@ def get_afqmc_data(trexio_dir, mo_num, verbose: bool = True) -> None:
         print(f"Nucleus repulsion energy: {e0}")
 
 
-    chol_num = trexio.read_mo_2e_int_eri_cholesky_num(trexio_file)
-    if verbose:
-        print(f"chol_num = {chol_num}") 
-    chol = np.zeros((mo_num, mo_num, chol_num))
+    #chol_num = trexio.read_ao_2e_int_eri_cholesky_num(trexio_file)
+    #if verbose:
+     #   print(f"chol_num = {chol_num}")
+    #chol = np.zeros((mo_num, mo_num, chol_num))
 
-    BUFFER_SIZE = 1000000
-    offset = 0
-    eof = False
-    while not eof:
-        indices, values, nread, eof = trexio.read_mo_2e_int_eri_cholesky(
-            trexio_file, offset, BUFFER_SIZE
-        )
-        offset += nread
-        for l, integral in enumerate(values):
-            i, j, k = indices[l]
-            chol[i, j, k] = integral
-    L = chol.reshape(mo_num * mo_num, chol_num)
-    if verbose:
-        print(f"Read Cholesky vectors")
+    #BUFFER_SIZE = 1000000
+    #offset = 0
+    #eof = False
+    #while not eof:
+     #   indices, values, nread, eof = trexio.read_ao_2e_int_eri_cholesky(
+      #      trexio_file, offset, BUFFER_SIZE
+       # )
+        #offset += nread
+        #for l, integral in enumerate(values):
+          #  i, j, k = indices[l]
+           # chol[i, j, k] = integral
+    #L = chol.reshape(mo_num * mo_num, chol_num)
+    #if verbose:
+     #   print(f"Read Cholesky vectors")
+
+
+    #BUFFER_SIZE = 1000000
+    #offset = 0
+    #eri = np.zeros([mo_num, mo_num, mo_num, mo_num])
+    #fcidump_threshold = 1e-10
+    #integral_eof = False
+
+    #while not integral_eof:
+     #   indices, values, nread, integral_eof = trexio.read_mo_2e_int_eri(
+      #  trexio_file, offset, BUFFER_SIZE
+    #)
+    #offset += nread
+
+    #for integral in range(nread):
+     #   val = values[integral]
+      #  if abs(val) < fcidump_threshold:
+       #     continue
+
+        #i, j, k, l = indices[integral]  # use as-is (0-based)
+
+        # unfold 8-fold symmetry
+        #for (p, q) in [(i, j), (j, i)]:
+         #   for (r, s) in [(k, l), (l, k)]:
+          #      eri[p, q, r, s] = val
+           #     eri[r, s, p, q] = val
+
         
     determinants = trexio.read_determinant_list(trexio_file, 0, ndet)[0]
     nint = trexio.get_int64_num(trexio_file)
 
-    binstr = []
     occa = []
     occb = []
+    binstr = []
 
     for d in determinants:
         alpha_bits = d[:nint]
         beta_bits = d[nint:]
 
-        occa.append(trexio.to_orbital_list(nint, alpha_bits)) 
+        occa.append(trexio.to_orbital_list(nint, alpha_bits))
         occb.append(trexio.to_orbital_list(nint, beta_bits))
-
-        # Convert each 64-bit integer to binary and concatenate
-
         alpha_int = sum(x << (64 * i) for i, x in enumerate(alpha_bits[::-1]))
         beta_int = sum(x << (64 * i) for i, x in enumerate(beta_bits[::-1]))
 
@@ -323,74 +380,60 @@ def get_afqmc_data(trexio_dir, mo_num, verbose: bool = True) -> None:
 
         binstr.append((alpha_bin, beta_bin))
 
-    occa = np.array(occa)
-    occb = np.array(occb)
-    binstr = np.array(binstr, dtype=object)
 
+# ---- Write CI coefficients
     with open ('CI_coeff.dat','w') as f:
         for i in range(len(ci_coeffs)):
             coeff = ci_coeffs[i]
             alpha_bin, beta_bin = binstr[i]
             f.write(f"{alpha_bin:<30} {beta_bin :<30} {coeff: 16f}\n")
 
+# ---- Write CAS wavefunction
     wt_list  = np.zeros(len(determinants))
     csum = 0.0
-
     for i in range(len(determinants)):
-        csum +=ci_coeffs[i]**2
+        csum += ci_coeffs[i] ** 2
         wt_list[i] = csum
 
-        format_det = lambda z: '  '.join([str(i[0]-1) for i in filter(lambda x : x[1] == '1', enumerate(z))])
+    with open('CAS_WF_rcas', 'w') as cas_file:
+        cas_file.write("# --- BEGIN TRIAL WAVE FUNCTION --- simple cut\n")
+        cas_file.write(f"# Total number of determinants = {ndet}\n")
+        cas_file.write(f"# Total weight                 = {wt_list[ndet-1]:.8f}\n")
+        cas_file.write('multidet_cfg\n')
 
-        with open('CAS_WF_rcas','w')as cas_file:
-            cas_file.write("# --- BEGIN TRIAL WAVE FUNCTION --- simple cut\n")
-            cas_file.write(f"# Total number of determinants = {ndet}\n")
-            cas_file.write(f"# Total weight                 = {wt_list[ndet-1]}\n")
-            cas_file.write('multidet_cfg\n')
+        for i in range(ndet):
+            a_str = '  '.join(str(o+1) for o in occa[i])
+            b_str = '  '.join(str(o+1) for o in occb[i])
+            cas_file.write(f"{a_str:20s} {b_str:20s} # {ci_coeffs[i]:20.16f}\n")
 
-            for i in range(ndet):
-                cas_file.write(f"{format_det(binstr[i][0])}\t{format_det(binstr[i][1])}\t#\t{ci_coeffs[i]: 20.16f}\n")
-            cas_file.write('\n')
-            cas_file.write('multidet_ampl\n')
-            cas_file.write('#             amplitude  # ndets   det_tot_weight\n')
+        cas_file.write('\nmultidet_ampl\n')
+        cas_file.write('#             amplitude  # ndets   det_tot_weight\n')
+        for i in range(ndet):
+            cas_file.write(f"{ci_coeffs[i]:20.16f} 0.0  #{i+1:20}\t{wt_list[i]:20.16f}\n")
+        cas_file.write('\nmultidet_type 1\n')
+        cas_file.write(f'npsitdet {ndet}\n')
+        cas_file.write('# --- END TRIAL WAVE FUNCTION --- simple cut\n')
 
-
-            for i in range(ndet):
-                cas_file.write(f"{ci_coeffs[i]:20.16f} 0.0  #{i:20}\t{wt_list[i]:20.16f}\n")
-            cas_file.write('\n')
-            cas_file.write('multidet_type 1\n')
-            cas_file.write(f'npsitdet {ndet}\n')
-            cas_file.write('# --- END TRIAL WAVE FUNCTION --- simple cut\n')
-    if verbose:
-        print(f"Read determinants")
-        #print("binstr: ", binstr)
-        #print("occa: ", occa)
-        #print(f"First determinant: {determinants[0]}")
-       # print(f"First determinant alpha (bin): {binstr[0][0]}")
-        #print(f"First determinant beta (bin): {binstr[0][1]}")
 
     result = {
         "norb": mo_num,
         "ndet": ndet,
         "nup": nup,
         "ndn": ndn,
-        "hcore": hcore,
         "ci_coeffs": ci_coeffs,
         "determinant": determinants[0],
-        "chol": chol,
-        "L": L[:, :chol_num],
         "NORB": mo_num,
     }
     return result
 
 
 
-#def core_mcd(chol, NORB, chmax=2000, tolcd=1e-5):
+def core_mcd(eri, NORB, chmax=2000, tolcd=1e-8):
     L = np.zeros((NORB * NORB, chmax))
     Dmax = np.zeros((NORB * NORB))
     ng = 0
 
-    V = h2e.reshape(NORB**2, NORB**2) / 2
+    V = eri.reshape(NORB**2, NORB**2) / 2
     Dmax[:] = np.diagonal(V)
 
     while True:
@@ -414,7 +457,8 @@ def get_afqmc_data(trexio_dir, mo_num, verbose: bool = True) -> None:
 
         ng += 1
     print("Cholesky fields:", ng)
-    return L[:, :ng], NORB
+    np.savetxt("L_matrix.txt", L[:, :ng])
+    return L[:, :ng]
 
 
 def write_mcd_core(NORB, L, filename ='V2b_AO_cholesky.mat'):
@@ -461,8 +505,8 @@ def afqmc_in(NORB,nup, ndn, ndet, afqmc_in_filename = 'afqmc.in'):
         f.write(f"N_ACT_DN {ndn}\n")
         f.write(f"N_DET {ndet}\n")
 
-        f.write(f"N_WLK {'200'}\n")
-        f.write(f"N_BLK {'1'}\n")
+        f.write(f"N_WLK {'100'}\n")
+        f.write(f"N_BLK {'100'}\n")
         f.write(f"N_BLKSTEPS {'20'}\n")
         f.write(f"ITV_MODSVD {'2'}\n")
         f.write(f"ITV_PC {'20'}\n")
@@ -494,7 +538,7 @@ def afqmc_in(NORB,nup, ndn, ndet, afqmc_in_filename = 'afqmc.in'):
         f.write(f"FLAG_MEASURETRIAL {'true'}\n")
         f.write(f"N_STREAMS {'32'}\n")
         f.write(f"DONT_PRECOMPUTE_Y {'false'}\n")
-        f.write(f"PRINT_DATA {'true'}\n")
+        f.write(f"PRINT_DATA {'false'}\n")
         f.write(f"FLAG_SMW {'true'}\n")
         f.write(f"COMPRESS_ERIS {'false'}\n")
         f.write(f"COMPRESS_ERIS_REAL {'false'}\n")
@@ -522,6 +566,7 @@ def main():
     mo_txt_file = os.path.join(args.trexio_filename, "mo.txt")
     mo_coeff = read_mo_coeff(mo_txt_file, verbose=args.verbose)
     mo_num = mo_coeff.shape[0]
+    eri = read_eri(os.path.join(args.trexio_filename, "ao_2e_int_eri.txt"), mo_num, args.verbose)
 
     hamiltonian_file = os.path.join(args.trexio_filename, "ao_1e_int.txt")
     overlap = read_overlap(hamiltonian_file, mo_num, args.verbose)
@@ -537,7 +582,7 @@ def main():
         afqmc_data["ndet"],
         afqmc_in_filename="afqmc.in"
     )
-    write_mcd_core(afqmc_data["NORB"], afqmc_data["L"])
+    write_mcd_core(afqmc_data["NORB"], L=core_mcd(eri, afqmc_data["NORB"]), filename='V2b_AO_cholesky.mat')
 
     if args.verbose:
         print("AFQMC input generation complete.")
